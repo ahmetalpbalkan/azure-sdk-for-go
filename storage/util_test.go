@@ -67,3 +67,29 @@ func (s *StorageClientSuite) Test_xmlMarshal(c *chk.C) {
 	c.Assert(out, chk.Equals, expected)
 	c.Assert(i, chk.Equals, len(expected))
 }
+
+func (s *StorageClientSuite) Test_jsonUnmarshal(c *chk.C) {
+	xml := `{"name":"myblob"}`
+	var blob struct {
+		Name string `json:"name"`
+	}
+	body := ioutil.NopCloser(strings.NewReader(xml))
+	c.Assert(jsonUnmarshal(body, &blob), chk.IsNil)
+	c.Assert(blob.Name, chk.Equals, "myblob")
+}
+
+func (s *StorageClientSuite) Test_jsonMarshal(c *chk.C) {
+	type t struct {
+		Name string `json:"name"`
+	}
+
+	b := t{Name: "myblob"}
+	expected := `{"name":"myblob"}`
+	r, i, err := jsonMarshal(b)
+	c.Assert(err, chk.IsNil)
+	o, err := ioutil.ReadAll(r)
+	c.Assert(err, chk.IsNil)
+	out := string(o)
+	c.Assert(out, chk.Equals, expected)
+	c.Assert(i, chk.Equals, len(expected))
+}

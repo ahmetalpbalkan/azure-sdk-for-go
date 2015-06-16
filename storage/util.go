@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -64,6 +65,22 @@ func xmlUnmarshal(body io.Reader, v interface{}) error {
 
 func xmlMarshal(v interface{}) (io.Reader, int, error) {
 	b, err := xml.Marshal(v)
+	if err != nil {
+		return nil, 0, err
+	}
+	return bytes.NewReader(b), len(b), nil
+}
+
+func jsonUnmarshal(body io.Reader, v interface{}) error {
+	data, err := ioutil.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+func jsonMarshal(v interface{}) (io.Reader, int, error) {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, 0, err
 	}

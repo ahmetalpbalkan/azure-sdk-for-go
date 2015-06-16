@@ -4,14 +4,11 @@ package storage
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -45,20 +42,6 @@ type storageResponse struct {
 	statusCode int
 	headers    http.Header
 	body       io.ReadCloser
-}
-
-// AzureStorageServiceError contains fields of the error response from
-// Azure Storage Service REST API. See https://msdn.microsoft.com/en-us/library/azure/dd179382.aspx
-// Some fields might be specific to certain calls.
-type AzureStorageServiceError struct {
-	Code                      string `xml:"Code"`
-	Message                   string `xml:"Message"`
-	AuthenticationErrorDetail string `xml:"AuthenticationErrorDetail"`
-	QueryParameterName        string `xml:"QueryParameterName"`
-	QueryParameterValue       string `xml:"QueryParameterValue"`
-	Reason                    string `xml:"Reason"`
-	StatusCode                int
-	RequestID                 string
 }
 
 // UnexpectedStatusCodeError is returned when a storage service responds with neither an error
@@ -112,7 +95,7 @@ func NewClient(accountName, accountKey, blobServiceBaseURL, apiVersion string, u
 	}, nil
 }
 
-func (c Client) getBaseURL(service string) string {
+func (c Client) getEndpoint(service, path string, params url.Values) *url.URL {
 	scheme := "http"
 	if c.useHTTPS {
 		scheme = "https"
@@ -120,26 +103,17 @@ func (c Client) getBaseURL(service string) string {
 
 	host := fmt.Sprintf("%s.%s.%s", c.accountName, service, c.baseURL)
 
-	u := &url.URL{
-		Scheme: scheme,
-		Host:   host}
-	return u.String()
-}
-
-func (c Client) getEndpoint(service, path string, params url.Values) string {
-	u, err := url.Parse(c.getBaseURL(service))
-	if err != nil {
-		// really should not be happening
-		panic(err)
+	// Add leading slash to path if not exists
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
 	}
 
-	if path == "" {
-		path = "/" // API doesn't accept path segments not starting with '/'
+	return &url.URL{
+		Scheme:   scheme,
+		Host:     host,
+		Path:     path,
+		RawQuery: params.Encode(),
 	}
-
-	u.Path = path
-	u.RawQuery = params.Encode()
-	return u.String()
 }
 
 // GetBlobService returns a BlobStorageClient which can operate on the blob
@@ -154,139 +128,42 @@ func (c Client) GetQueueService() QueueServiceClient {
 	return QueueServiceClient{c}
 }
 
-func (c Client) createAuthorizationHeader(canonicalizedString string) string {
-	signature := c.computeHmac256(canonicalizedString)
-	return fmt.Sprintf("%s %s:%s", "SharedKey", c.accountName, signature)
-}
-
-func (c Client) getAuthorizationHeader(verb, url string, headers map[string]string) (string, error) {
-	canonicalizedResource, err := c.buildCanonicalizedResource(url)
-	if err != nil {
-		return "", err
-	}
-
-	canonicalizedString := c.buildCanonicalizedString(verb, headers, canonicalizedResource)
-	return c.createAuthorizationHeader(canonicalizedString), nil
+// GetTableService returns a TableServiceClient which can operate on the table
+// service of the storage account.
+func (c Client) GetTableService() TableServiceClient {
+	return TableServiceClient{c}
 }
 
 func (c Client) getStandardHeaders() map[string]string {
+	d := currentTimeRfc1123Formatted()
 	return map[string]string{
 		"x-ms-version": c.apiVersion,
-		"x-ms-date":    currentTimeRfc1123Formatted(),
+		"x-ms-date":    d,
 	}
 }
 
-func (c Client) buildCanonicalizedHeader(headers map[string]string) string {
-	cm := make(map[string]string)
-
-	for k, v := range headers {
-		headerName := strings.TrimSpace(strings.ToLower(k))
-		match, _ := regexp.MatchString("x-ms-", headerName)
-		if match {
-			cm[headerName] = v
-		}
-	}
-
-	if len(cm) == 0 {
-		return ""
-	}
-
-	keys := make([]string, 0, len(cm))
-	for key := range cm {
-		keys = append(keys, key)
-	}
-
-	sort.Strings(keys)
-
-	ch := ""
-
-	for i, key := range keys {
-		if i == len(keys)-1 {
-			ch += fmt.Sprintf("%s:%s", key, cm[key])
-		} else {
-			ch += fmt.Sprintf("%s:%s\n", key, cm[key])
-		}
-	}
-	return ch
-}
-
-func (c Client) buildCanonicalizedResource(uri string) (string, error) {
-	errMsg := "buildCanonicalizedResource error: %s"
-	u, err := url.Parse(uri)
+func (c Client) getAuthorizationHeader(signer requestSigner, verb string, url *url.URL, headers map[string]string) (string, error) {
+	canonicalizedString, err := signer.canonicalizedString(verb, headers, url)
 	if err != nil {
-		return "", fmt.Errorf(errMsg, err.Error())
+		return "", fmt.Errorf("storage: error parsing the request for signing: %v", err)
 	}
-
-	cr := "/" + c.accountName
-	if len(u.Path) > 0 {
-		cr += u.Path
-	}
-
-	params, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return "", fmt.Errorf(errMsg, err.Error())
-	}
-
-	if len(params) > 0 {
-		cr += "\n"
-		keys := make([]string, 0, len(params))
-		for key := range params {
-			keys = append(keys, key)
-		}
-
-		sort.Strings(keys)
-
-		for i, key := range keys {
-			if len(params[key]) > 1 {
-				sort.Strings(params[key])
-			}
-
-			if i == len(keys)-1 {
-				cr += fmt.Sprintf("%s:%s", key, strings.Join(params[key], ","))
-			} else {
-				cr += fmt.Sprintf("%s:%s\n", key, strings.Join(params[key], ","))
-			}
-		}
-	}
-	return cr, nil
+	signed := c.computeHmac256(canonicalizedString) // sign with key
+	return fmt.Sprintf("%s %s:%s", signer.authScheme(), c.accountName, signed), nil
 }
 
-func (c Client) buildCanonicalizedString(verb string, headers map[string]string, canonicalizedResource string) string {
-	canonicalizedString := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
-		verb,
-		headers["Content-Encoding"],
-		headers["Content-Language"],
-		headers["Content-Length"],
-		headers["Content-MD5"],
-		headers["Content-Type"],
-		headers["Date"],
-		headers["If-Modified-Singe"],
-		headers["If-Match"],
-		headers["If-None-Match"],
-		headers["If-Unmodified-Singe"],
-		headers["Range"],
-		c.buildCanonicalizedHeader(headers),
-		canonicalizedResource)
-
-	return canonicalizedString
-}
-
-func (c Client) exec(verb, url string, headers map[string]string, body io.Reader) (*storageResponse, error) {
-	authHeader, err := c.getAuthorizationHeader(verb, url, headers)
+func (c Client) exec(verb string, url *url.URL, headers map[string]string, body io.Reader, signer requestSigner, errFunc serviceErrorFunc) (*storageResponse, error) {
+	authHeader, err := c.getAuthorizationHeader(signer, verb, url, headers)
 	if err != nil {
 		return nil, err
 	}
 	headers["Authorization"] = authHeader
 
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(verb, url, body)
+	req, err := http.NewRequest(verb, url.String(), body)
 	for k, v := range headers {
 		req.Header.Add(k, v)
 	}
-	httpClient := http.Client{}
+	httpClient := http.DefaultClient
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -302,14 +179,11 @@ func (c Client) exec(verb, url string, headers map[string]string, body io.Reader
 
 		if len(respBody) == 0 {
 			// no error in response body
-			err = fmt.Errorf("storage: service returned without a response body (%s)", resp.Status)
+			err = fmt.Errorf("storage: service returned without a response body (%s)",
+				resp.Status)
 		} else {
 			// response contains storage service error object, unmarshal
-			storageErr, errIn := serviceErrFromXML(respBody, resp.StatusCode, resp.Header.Get("x-ms-request-id"))
-			if err != nil { // error unmarshaling the error response
-				err = errIn
-			}
-			err = storageErr
+			err = errFunc(respBody, resp.StatusCode, resp.Header.Get("x-ms-request-id"))
 		}
 		return &storageResponse{
 			statusCode: resp.StatusCode,
@@ -331,20 +205,6 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 		err = nil
 	}
 	return out, err
-}
-
-func serviceErrFromXML(body []byte, statusCode int, requestID string) (AzureStorageServiceError, error) {
-	var storageErr AzureStorageServiceError
-	if err := xml.Unmarshal(body, &storageErr); err != nil {
-		return storageErr, err
-	}
-	storageErr.StatusCode = statusCode
-	storageErr.RequestID = requestID
-	return storageErr, nil
-}
-
-func (e AzureStorageServiceError) Error() string {
-	return fmt.Sprintf("storage: service returned error: StatusCode=%d, ErrorCode=%s, ErrorMessage=%s, RequestId=%s", e.StatusCode, e.Code, e.Message, e.RequestID)
 }
 
 // checkRespCode returns UnexpectedStatusError if the given response code is not

@@ -19,6 +19,14 @@ type BlobStorageClient struct {
 	client Client
 }
 
+func (b BlobStorageClient) exec(verb string, url *url.URL, headers map[string]string, body io.Reader) (*storageResponse, error) {
+	return b.client.exec(verb, url, headers, body, b.signer(), serviceErrFromXML)
+}
+
+func (b BlobStorageClient) signer() blobQueueSigner {
+	return blobQueueSigner{baseSigner{accountName: b.client.accountName}}
+}
+
 // A Container is an entry in ContainerListResponse.
 type Container struct {
 	Name       string              `xml:"Name"`
@@ -289,7 +297,7 @@ func (b BlobStorageClient) ListContainers(params ListContainersParameters) (Cont
 	headers := b.client.getStandardHeaders()
 
 	var out ContainerListResponse
-	resp, err := b.client.exec("GET", uri, headers, nil)
+	resp, err := b.exec("GET", uri, headers, nil)
 	if err != nil {
 		return out, err
 	}
@@ -334,7 +342,7 @@ func (b BlobStorageClient) createContainer(name string, access ContainerAccessTy
 	if access != "" {
 		headers["x-ms-blob-public-access"] = string(access)
 	}
-	return b.client.exec(verb, uri, headers, nil)
+	return b.exec(verb, uri, headers, nil)
 }
 
 // ContainerExists returns true if a container with given name exists
@@ -344,7 +352,7 @@ func (b BlobStorageClient) ContainerExists(name string) (bool, error) {
 	uri := b.client.getEndpoint(blobServiceName, pathForContainer(name), url.Values{"restype": {"container"}})
 	headers := b.client.getStandardHeaders()
 
-	resp, err := b.client.exec(verb, uri, headers, nil)
+	resp, err := b.exec(verb, uri, headers, nil)
 	if resp != nil {
 		defer resp.body.Close()
 		if resp.statusCode == http.StatusOK || resp.statusCode == http.StatusNotFound {
@@ -389,7 +397,7 @@ func (b BlobStorageClient) deleteContainer(name string) (*storageResponse, error
 	uri := b.client.getEndpoint(blobServiceName, pathForContainer(name), url.Values{"restype": {"container"}})
 
 	headers := b.client.getStandardHeaders()
-	return b.client.exec(verb, uri, headers, nil)
+	return b.exec(verb, uri, headers, nil)
 }
 
 // ListBlobs returns an object that contains list of blobs in the container,
@@ -404,7 +412,7 @@ func (b BlobStorageClient) ListBlobs(container string, params ListBlobsParameter
 	headers := b.client.getStandardHeaders()
 
 	var out BlobListResponse
-	resp, err := b.client.exec("GET", uri, headers, nil)
+	resp, err := b.exec("GET", uri, headers, nil)
 	if err != nil {
 		return out, err
 	}
@@ -421,7 +429,7 @@ func (b BlobStorageClient) BlobExists(container, name string) (bool, error) {
 	uri := b.client.getEndpoint(blobServiceName, pathForBlob(container, name), url.Values{})
 
 	headers := b.client.getStandardHeaders()
-	resp, err := b.client.exec(verb, uri, headers, nil)
+	resp, err := b.exec(verb, uri, headers, nil)
 	if resp != nil {
 		defer resp.body.Close()
 		if resp.statusCode == http.StatusOK || resp.statusCode == http.StatusNotFound {
@@ -431,15 +439,20 @@ func (b BlobStorageClient) BlobExists(container, name string) (bool, error) {
 	return false, err
 }
 
+func (b BlobStorageClient) getBlobURL(container, name string) *url.URL {
+	if container == "" {
+		container = "$root"
+	}
+	return b.client.getEndpoint(blobServiceName, pathForBlob(container, name),
+		url.Values{})
+}
+
 // GetBlobURL gets the canonical URL to the blob with the specified name in the
 // specified container. This method does not create a publicly accessible URL if
 // the blob or container is private and this method does not check if the blob
 // exists.
 func (b BlobStorageClient) GetBlobURL(container, name string) string {
-	if container == "" {
-		container = "$root"
-	}
-	return b.client.getEndpoint(blobServiceName, pathForBlob(container, name), url.Values{})
+	return b.getBlobURL(container, name).String()
 }
 
 // GetBlob returns a stream to read the blob. Caller must call Close() the
@@ -482,7 +495,7 @@ func (b BlobStorageClient) getBlobRange(container, name, bytesRange string) (*st
 	if bytesRange != "" {
 		headers["Range"] = fmt.Sprintf("bytes=%s", bytesRange)
 	}
-	resp, err := b.client.exec(verb, uri, headers, nil)
+	resp, err := b.exec(verb, uri, headers, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +509,7 @@ func (b BlobStorageClient) GetBlobProperties(container, name string) (*BlobPrope
 	uri := b.client.getEndpoint(blobServiceName, pathForBlob(container, name), url.Values{})
 
 	headers := b.client.getStandardHeaders()
-	resp, err := b.client.exec(verb, uri, headers, nil)
+	resp, err := b.exec(verb, uri, headers, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +564,7 @@ func (b BlobStorageClient) CreateBlockBlob(container, name string) error {
 	headers["x-ms-blob-type"] = string(BlobTypeBlock)
 	headers["Content-Length"] = fmt.Sprintf("%v", 0)
 
-	resp, err := b.client.exec("PUT", uri, headers, nil)
+	resp, err := b.exec("PUT", uri, headers, nil)
 	if err != nil {
 		return err
 	}
@@ -578,7 +591,7 @@ func (b BlobStorageClient) PutBlockWithLength(container, name, blockID string, s
 	headers["x-ms-blob-type"] = string(BlobTypeBlock)
 	headers["Content-Length"] = fmt.Sprintf("%v", size)
 
-	resp, err := b.client.exec("PUT", uri, headers, blob)
+	resp, err := b.exec("PUT", uri, headers, blob)
 	if err != nil {
 		return err
 	}
@@ -596,7 +609,7 @@ func (b BlobStorageClient) PutBlockList(container, name string, blocks []Block) 
 	headers := b.client.getStandardHeaders()
 	headers["Content-Length"] = fmt.Sprintf("%v", len(blockListXML))
 
-	resp, err := b.client.exec("PUT", uri, headers, strings.NewReader(blockListXML))
+	resp, err := b.exec("PUT", uri, headers, strings.NewReader(blockListXML))
 	if err != nil {
 		return err
 	}
@@ -613,7 +626,7 @@ func (b BlobStorageClient) GetBlockList(container, name string, blockType BlockL
 	headers := b.client.getStandardHeaders()
 
 	var out BlockListResponse
-	resp, err := b.client.exec("GET", uri, headers, nil)
+	resp, err := b.exec("GET", uri, headers, nil)
 	if err != nil {
 		return out, err
 	}
@@ -636,7 +649,7 @@ func (b BlobStorageClient) PutPageBlob(container, name string, size int64) error
 	headers["x-ms-blob-content-length"] = fmt.Sprintf("%v", size)
 	headers["Content-Length"] = fmt.Sprintf("%v", 0)
 
-	resp, err := b.client.exec("PUT", uri, headers, nil)
+	resp, err := b.exec("PUT", uri, headers, nil)
 	if err != nil {
 		return err
 	}
@@ -669,7 +682,7 @@ func (b BlobStorageClient) PutPage(container, name string, startByte, endByte in
 	}
 	headers["Content-Length"] = fmt.Sprintf("%v", contentLength)
 
-	resp, err := b.client.exec("PUT", uri, headers, data)
+	resp, err := b.exec("PUT", uri, headers, data)
 	if err != nil {
 		return err
 	}
@@ -687,7 +700,7 @@ func (b BlobStorageClient) GetPageRanges(container, name string) (GetPageRangesR
 	headers := b.client.getStandardHeaders()
 
 	var out GetPageRangesResponse
-	resp, err := b.client.exec("GET", uri, headers, nil)
+	resp, err := b.exec("GET", uri, headers, nil)
 	if err != nil {
 		return out, err
 	}
@@ -722,7 +735,7 @@ func (b BlobStorageClient) startBlobCopy(container, name, sourceBlob string) (st
 	headers["Content-Length"] = "0"
 	headers["x-ms-copy-source"] = sourceBlob
 
-	resp, err := b.client.exec("PUT", uri, headers, nil)
+	resp, err := b.exec("PUT", uri, headers, nil)
 	if err != nil {
 		return "", err
 	}
@@ -795,7 +808,7 @@ func (b BlobStorageClient) deleteBlob(container, name string) (*storageResponse,
 	uri := b.client.getEndpoint(blobServiceName, pathForBlob(container, name), url.Values{})
 	headers := b.client.getStandardHeaders()
 
-	return b.client.exec(verb, uri, headers, nil)
+	return b.exec(verb, uri, headers, nil)
 }
 
 // helper method to construct the path to a container given its name
@@ -816,9 +829,9 @@ func pathForBlob(container, name string) string {
 func (b BlobStorageClient) GetBlobSASURI(container, name string, expiry time.Time, permissions string) (string, error) {
 	var (
 		signedPermissions = permissions
-		blobURL           = b.GetBlobURL(container, name)
+		blobURL           = b.getBlobURL(container, name)
 	)
-	canonicalizedResource, err := b.client.buildCanonicalizedResource(blobURL)
+	canonicalizedResource, err := b.signer().canonicalResource(blobURL)
 	if err != nil {
 		return "", err
 	}
@@ -839,10 +852,7 @@ func (b BlobStorageClient) GetBlobSASURI(container, name string, expiry time.Tim
 		"sig": {sig},
 	}
 
-	sasURL, err := url.Parse(blobURL)
-	if err != nil {
-		return "", err
-	}
+	sasURL := blobURL
 	sasURL.RawQuery = sasParams.Encode()
 	return sasURL.String(), nil
 }
